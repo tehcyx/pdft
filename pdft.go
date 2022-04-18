@@ -1,16 +1,22 @@
 package pdft
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/md5"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/disintegration/imaging"
+	"github.com/rwcarlsen/goexif/exif"
 	gopdf "github.com/signintech/pdft/minigopdf"
 )
 
@@ -312,6 +318,144 @@ func (i *PDFt) InsertImg(img []byte, pageNum int, x float64, y float64, w float6
 	//fmt.Printf("append(i.contenters, &ct) %d\n", len(i.contenters))
 	//i.insertContenters(0, &ct)
 	return nil
+}
+
+func (i *PDFt) InsertImgPct(imgPath string, pageNum int, x float64, y float64, scale float64) error {
+	pic, err := getPic(imgPath, scale)
+	if err != nil {
+		return err
+	}
+	err = i.InsertImg(pic.pic, pageNum, x, y, pic.width, pic.height)
+	return err
+}
+
+func (i *PDFt) InsertImgWithCachePct(imgPath string, pageNum int, x float64, y float64, scale float64) error {
+	pic, err := getPic(imgPath, scale)
+	if err != nil {
+		return err
+	}
+	err = i.InsertImgWithCache(pic.pic, pageNum, x, y, pic.width, pic.height)
+	return err
+}
+
+type picData struct {
+	pic    []byte
+	width  float64
+	height float64
+}
+
+func getPic(imgPath string, scale float64) (picData, error) {
+	img, err := os.Open(imgPath)
+	if err != nil {
+		panic("couldn't open image")
+	}
+	defer img.Close()
+
+	if scale < 0 {
+		return picData{}, errors.New("scale of image should be between 0-100")
+	}
+	if img == nil {
+		return picData{}, errors.New("failed to pass image file")
+	}
+
+	filetype, err := getSuffix(imgPath)
+	if err != nil {
+		return picData{}, nil
+	}
+	var decodedImage image.Image
+	if filetype == "jpg" || filetype == "jpeg" {
+		decodedImage, err = jpeg.Decode(img)
+		if err != nil {
+			return picData{}, errors.New("failed to decode image")
+		}
+	} else if filetype == "png" {
+		decodedImage, err = png.Decode(img)
+		if err != nil {
+			return picData{}, errors.New("failed to decode image")
+		}
+	}
+	x, err := exif.Decode(img)
+	if err != nil {
+		if x != nil {
+			return picData{}, fmt.Errorf("failed reading exif data in [%s]: %s", imgPath, err.Error())
+		}
+	} else {
+		if x != nil {
+			orient, _ := x.Get(exif.Orientation)
+			if orient != nil {
+				decodedImage = reverseOrientation(decodedImage, orient.String())
+			} else {
+				decodedImage = reverseOrientation(decodedImage, "1")
+			}
+			imaging.Save(decodedImage, imgPath)
+		}
+	}
+
+	// reset to 0,0 as Decode/DecodeConfig consumes the read
+	_, err = img.Seek(0, 0)
+	if err != nil {
+		return picData{}, err
+	}
+
+	dimensionImage, _, err := image.Decode(bufio.NewReader(img))
+	if err != nil {
+		return picData{}, err
+	}
+
+	width, height := float64(dimensionImage.Bounds().Max.X), float64(dimensionImage.Bounds().Max.Y)
+	if width < 0 || height < 0 {
+		return picData{}, errors.New("failed to get dimensions")
+	}
+
+	w := width / 100 * scale
+	h := height / 100 * scale
+
+	// reset to 0,0 as Decode/DecodeConfig consumes the read
+	_, err = img.Seek(0, 0)
+	if err != nil {
+		return picData{}, err
+	}
+
+	reader := bufio.NewReader(img)
+
+	pic, err := ioutil.ReadAll(reader)
+	if err != nil {
+		return picData{}, err
+	}
+	return picData{
+		pic:    pic,
+		width:  w,
+		height: h,
+	}, nil
+}
+
+func reverseOrientation(img image.Image, o string) *image.NRGBA {
+	switch o {
+	case "1":
+		return imaging.Clone(img)
+	case "2":
+		return imaging.FlipV(img)
+	case "3":
+		return imaging.Rotate180(img)
+	case "4":
+		return imaging.Rotate180(imaging.FlipV(img))
+	case "5":
+		return imaging.Rotate270(imaging.FlipV(img))
+	case "6":
+		return imaging.Rotate270(img)
+	case "7":
+		return imaging.Rotate90(imaging.FlipV(img))
+	case "8":
+		return imaging.Rotate90(img)
+	}
+	return imaging.Clone(img)
+}
+
+func getSuffix(path string) (string, error) {
+	if !strings.Contains(path, ".") {
+		return "", errors.New("filename does not contain `.`")
+	}
+	return path[strings.LastIndex(path, "."):], nil
 }
 
 //InsertImgWithCache insert img with cache
